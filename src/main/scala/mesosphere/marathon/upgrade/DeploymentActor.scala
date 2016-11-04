@@ -15,7 +15,7 @@ import mesosphere.marathon.core.readiness.ReadinessCheckExecutor
 import mesosphere.marathon.core.task.termination.{ KillReason, KillService }
 import mesosphere.marathon.core.task.tracker.InstanceTracker
 import mesosphere.marathon.io.storage.StorageProvider
-import mesosphere.marathon.state.{ AppDefinition, RunSpec }
+import mesosphere.marathon.state.{ AppDefinition, RunSpec, Timestamp }
 import mesosphere.marathon.upgrade.DeploymentManager.{ DeploymentFailed, DeploymentFinished, DeploymentStepInfo }
 import mesosphere.mesos.Constraints
 import org.apache.mesos.SchedulerDriver
@@ -137,7 +137,12 @@ private class DeploymentActor(
   def scaleRunnable(runnableSpec: RunSpec, scaleTo: Int,
     toKill: Option[Seq[Instance]],
     status: DeploymentStatus): Future[Unit] = {
-    val runningInstances = instanceTracker.specInstancesSync(runnableSpec.id).filter(_.state.condition.isActive)
+
+    // See ExpungeOverdueLostTasksActorLogic.timeUntilReplacement. Should come from runnableSpec
+    val now: Timestamp = Timestamp.now()
+    val timeUntilReplacement = 5.minutes
+    val runningInstances = instanceTracker.specInstancesSync(runnableSpec.id).filter(_.isActive(now, timeUntilReplacement))
+
     def killToMeetConstraints(notSentencedAndRunning: Seq[Instance], toKillCount: Int) = {
       Constraints.selectInstancesToKill(runnableSpec, notSentencedAndRunning, toKillCount)
     }

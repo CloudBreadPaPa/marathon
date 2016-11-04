@@ -104,7 +104,7 @@ class SchedulerActionsTest
     Given("An active queue and unreachable tasks")
     val app = MarathonTestHelper.makeBasicApp().copy(instances = 15)
 
-    val unreachableInstances = Seq.fill(5)(TestInstanceBuilder.newBuilder(app.id).addTaskUnreachableInactive().getInstance())
+    val unreachableInstances = Seq.fill(5)(TestInstanceBuilder.newBuilder(app.id).addTaskUnreachable(Timestamp.zero).getInstance())
     val runnningInstances = Seq.fill(10)(TestInstanceBuilder.newBuilder(app.id).addTaskRunning().getInstance())
     f.taskTracker.specInstancesSync(eq(app.id)) returns (unreachableInstances ++ runnningInstances)
 

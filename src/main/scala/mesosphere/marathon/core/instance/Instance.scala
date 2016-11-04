@@ -18,6 +18,7 @@ import org.slf4j.{ Logger, LoggerFactory }
 import play.api.libs.json.{ Reads, Writes }
 
 import scala.annotation.tailrec
+import scala.concurrent.duration.FiniteDuration
 // TODO: Remove timestamp format
 import mesosphere.marathon.api.v2.json.Formats.TimestampFormat
 import play.api.libs.json.{ Format, JsResult, JsString, JsValue, Json }
@@ -44,12 +45,13 @@ case class Instance(
   def isStaging: Boolean = state.condition == Condition.Staging
   def isStarting: Boolean = state.condition == Condition.Starting
   def isUnreachable: Boolean = state.condition == Condition.Unreachable
-  def isUnreachableInactive: Boolean = state.condition == Condition.UnreachableInactive
   def isGone: Boolean = state.condition == Condition.Gone
   def isUnknown: Boolean = state.condition == Condition.Unknown
   def isDropped: Boolean = state.condition == Condition.Dropped
   def isTerminated: Boolean = state.condition.isTerminal
-  def isActive: Boolean = state.condition.isActive
+  def isActive(now: Timestamp, timeout: FiniteDuration): Boolean = {
+    state.condition.isActive && !tasksMap.valuesIterator.exists(_.isUnreachableExpired(now, timeout))
+  }
 
   import Instance.eventsGenerator
 
@@ -176,36 +178,6 @@ object Instance {
   private val eventsGenerator = InstanceChangedEventsGenerator
   private val log: Logger = LoggerFactory.getLogger(classOf[Instance])
 
-  /**
-    * An instance can only have this status, if all tasks of the instance have this status.
-    * The order of the status is important.
-    * If 2 tasks are Running and 2 tasks already Finished, the final status is Running.
-    */
-  private val AllInstanceConditions: Seq[Condition] = Seq(
-    Condition.Created,
-    Condition.Reserved,
-    Condition.Running,
-    Condition.Finished,
-    Condition.Killed
-  )
-
-  /**
-    * An instance has this status, if at least one tasks of the instance has this status.
-    * The order of the status is important.
-    * If one task is Error and one task is Staging, the instance status is Error.
-    */
-  private val DistinctInstanceConditions: Seq[Condition] = Seq(
-    Condition.Error,
-    Condition.Failed,
-    Condition.Gone,
-    Condition.Dropped,
-    Condition.Unreachable,
-    Condition.Killing,
-    Condition.Starting,
-    Condition.Staging,
-    Condition.Unknown
-  )
-
   def instancesById(tasks: Seq[Instance]): Map[Instance.Id, Instance] =
     tasks.map(task => task.instanceId -> task)(collection.breakOut)
 
@@ -221,48 +193,64 @@ object Instance {
 
   object InstanceState {
 
+    // Define task condition priorities.
+    // If 2 tasks are Running and 2 tasks already Finished, the final status is Running.
+    // If one task is Error and one task is Staging, the instance status is Error.
+    val conditionOrdering: (Condition) => Int = Seq(
+      // If one task has one of the following conditions that one is assigned.
+      Condition.Error,
+      Condition.Failed,
+      Condition.Gone,
+      Condition.Dropped,
+      Condition.Unreachable,
+      Condition.Killing,
+      Condition.Starting,
+      Condition.Staging,
+      Condition.Unknown,
+
+      //From here on all tasks are either Created, Reserved, Running, Finished, or Killed
+      Condition.Created,
+      Condition.Reserved,
+      Condition.Running,
+      Condition.Finished,
+      Condition.Killed
+    ).indexOf(_)
+
     /**
       * Construct a new InstanceState.
       *
       * @param maybeOldState The old state of the instance if any.
-      * @param newTaskMap New tasks and their status that form the update instance.
-      * @param timestamp Timestamp of update.
+      * @param newTaskMap    New tasks and their status that form the update instance.
+      * @param now           Timestamp of update.
       * @return new InstanceState
       */
     @SuppressWarnings(Array("TraversableHead"))
     def apply(
       maybeOldState: Option[InstanceState],
       newTaskMap: Map[Task.Id, Task],
-      timestamp: Timestamp): InstanceState = {
+      now: Timestamp): InstanceState = {
 
       val tasks = newTaskMap.values
 
-      // compute the new instance state
-      val conditionMap = tasks.groupBy(_.status.condition)
-      val condition = if (conditionMap.size == 1) {
-        // all tasks have the same condition -> this is the instance condition
-        conditionMap.keys.head
-      } else {
-        // since we don't have a distinct state, we remove states where all tasks have to agree on
-        // and search for a distinct state
-        val distinctCondition = Instance.AllInstanceConditions.foldLeft(conditionMap) { (ds, status) => ds - status }
-        Instance.DistinctInstanceConditions.find(distinctCondition.contains).getOrElse {
-          // if no distinct condition is found all tasks are in different AllInstanceConditions
-          // we pick the first matching one
-          Instance.AllInstanceConditions.find(conditionMap.contains).getOrElse {
-            // if we come here, something is wrong, since we covered all existing states
-            Instance.log.error(s"Could not compute new instance condition for condition map: $conditionMap")
-            Condition.Unknown
-          }
-        }
-      }
+      // compute the new instance condition
+      val condition = conditionFromTasks(tasks)
+
+      val active: Option[Timestamp] = activeSince(tasks)
 
       val healthy = computeHealth(tasks.toVector)
       maybeOldState match {
         case Some(state) if state.condition == condition && state.healthy == healthy => state
-        case _ =>
-          InstanceState(condition, timestamp, activeSince(tasks), healthy)
+        case _ => InstanceState(condition, now, active, healthy)
       }
+    }
+
+    /**
+      * @return condition for instance with tasks.
+      */
+    def conditionFromTasks(tasks: Iterable[Task]): Condition = {
+      // TODO: Fails on empty tasks
+      // The smallest Condition according to conditionOrdering is the condition for the whole instance.
+      tasks.view.map(_.status.condition).minBy(conditionOrdering)
     }
 
     /**

@@ -10,7 +10,3 @@ case class TimeoutException(reason: String, cause: Throwable) extends JavaTimeou
   def this(reason: String) = this(reason, null)
   override def getCause: Throwable = cause
 }
-
-object TimeoutException {
-  def apply(reason: String): TimeoutException = new TimeoutException(reason)
-}

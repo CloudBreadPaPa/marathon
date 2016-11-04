@@ -89,10 +89,6 @@ object Condition {
   // Unreachable: the master has not heard from the agent running the task for a configurable period of time
   case object Unreachable extends Condition with Active
 
-  // The task has been unreachable for a configurable time. A replacement task is started but this one won't be killed
-  // yet.
-  case object UnreachableInactive extends Condition
-
   // Gone: the task was running on an agent that has been terminated
   case object Gone extends Condition with Terminal
 

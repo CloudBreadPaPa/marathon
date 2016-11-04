@@ -16,7 +16,7 @@ import mesosphere.marathon.core.launchqueue.LaunchQueue
 import mesosphere.marathon.core.task.Task
 import mesosphere.marathon.core.task.termination.{ KillReason, KillService }
 import mesosphere.marathon.core.task.tracker.InstanceTracker
-import mesosphere.marathon.state.{ PathId, RunSpec }
+import mesosphere.marathon.state.{ PathId, RunSpec, Timestamp }
 import mesosphere.marathon.storage.repository.{ DeploymentRepository, GroupRepository, ReadOnlyAppRepository, ReadOnlyPodRepository }
 import mesosphere.marathon.stream._
 import mesosphere.marathon.upgrade.DeploymentManager._
@@ -518,7 +518,10 @@ class SchedulerActions(
   // FIXME: extract computation into a function that can be easily tested
   def scale(runSpec: RunSpec): Unit = {
 
-    val runningTasks = instanceTracker.specInstancesSync(runSpec.id).filter(_.state.condition.isActive)
+    // See ExpungeOverdueLostTasksActorLogic.timeUntilReplacement. Should come from runSpec
+    val now: Timestamp = Timestamp.now()
+    val timeUntilReplacement = 5.minutes
+    val runningInstances = instanceTracker.specInstancesSync(runSpec.id).filter(_.isActive(now, timeUntilReplacement))
 
     def killToMeetConstraints(notSentencedAndRunning: Seq[Instance], toKillCount: Int) = {
       Constraints.selectInstancesToKill(runSpec, notSentencedAndRunning, toKillCount)
@@ -526,10 +529,10 @@ class SchedulerActions(
 
     val targetCount = runSpec.instances
 
-    val ScalingProposition(tasksToKill, tasksToStart) = ScalingProposition.propose(runningTasks, None, killToMeetConstraints, targetCount)
+    val ScalingProposition(tasksToKill, tasksToStart) = ScalingProposition.propose(runningInstances, None, killToMeetConstraints, targetCount)
 
     tasksToKill.foreach { tasks: Seq[Instance] =>
-      log.info(s"Scaling ${runSpec.id} from ${runningTasks.size} down to $targetCount instances")
+      log.info(s"Scaling ${runSpec.id} from ${runningInstances.size} down to $targetCount instances")
 
       launchQueue.purge(runSpec.id)
 
@@ -538,13 +541,13 @@ class SchedulerActions(
     }
 
     tasksToStart.foreach { toQueue: Int =>
-      log.info(s"Need to scale ${runSpec.id} from ${runningTasks.size} up to $targetCount instances")
+      log.info(s"Need to scale ${runSpec.id} from ${runningInstances.size} up to $targetCount instances")
 
       if (toQueue > 0) {
         log.info(s"Queueing $toQueue new tasks for ${runSpec.id}")
         launchQueue.add(runSpec, toQueue)
       } else {
-        log.info(s"Already queued or started ${runningTasks.size} tasks for ${runSpec.id}. Not scaling.")
+        log.info(s"Already queued or started ${runningInstances.size} tasks for ${runSpec.id}. Not scaling.")
       }
     }
 

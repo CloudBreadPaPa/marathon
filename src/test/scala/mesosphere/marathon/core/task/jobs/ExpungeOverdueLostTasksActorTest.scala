@@ -7,7 +7,7 @@ import akka.testkit.TestProbe
 import mesosphere.AkkaUnitTest
 import mesosphere.marathon.core.base.{ Clock, ConstantClock }
 import mesosphere.marathon.core.condition.Condition
-import mesosphere.marathon.core.instance.TestInstanceBuilder
+import mesosphere.marathon.core.instance.{ Instance, TestInstanceBuilder }
 import mesosphere.marathon.core.instance.update.InstanceUpdateOperation
 import mesosphere.marathon.core.task.jobs.impl.{ ExpungeOverdueLostTasksActor, ExpungeOverdueLostTasksActorLogic }
 import mesosphere.marathon.core.task.tracker.InstanceTracker.InstancesBySpec
@@ -58,27 +58,24 @@ class ExpungeOverdueLostTasksActorTest extends AkkaUnitTest with TableDrivenProp
 
     // format: OFF
     val taskCases = Table(
-      ("name",        "startedAt",    "since",        "condition",                   "inactive", "expunge"),
-      ("running",     Timestamp.zero, Timestamp.zero, Condition.Running,             false,      false    ),
-      ("inactive",    Timestamp.zero, Timestamp.zero, Condition.UnreachableInactive, false,      true     ),
-      ("unreachable", Timestamp.zero, f.clock.now,    Condition.Unreachable,         false,      false    ),
-      ("unreachable", Timestamp.zero, Timestamp.zero, Condition.Unreachable,         true,       false    )
+      ("name",        "startedAt",    "since",                                                 "condition",           "expunge"),
+      ("running",     Timestamp.zero, Timestamp.zero,                                          Condition.Running,     false    ),
+      ("inactive",    Timestamp.zero, f.clock.now - businessLogic.timeUntilExpunge - 1.minute, Condition.Unreachable, true     ),
+      ("unreachable", Timestamp.zero, f.clock.now - businessLogic.timeUntilReplacement,        Condition.Unreachable, false    ),
+      ("unreachable", Timestamp.zero, Timestamp.zero,                                          Condition.Unreachable, true     )
     )
     // format: ON
 
-    forAll(taskCases) { (name: String, startedAt: Timestamp, since: Timestamp, condition: Condition, inactive: Boolean, expunge: Boolean) =>
-      s"filtering $name task sind $since" should {
-        val task = condition match {
+    forAll(taskCases) { (name: String, startedAt: Timestamp, since: Timestamp, condition: Condition, expunge: Boolean) =>
+      s"filtering $name task since $since" should {
+        val instance: Instance = condition match {
           case Condition.Unreachable => TestInstanceBuilder.newBuilder("/unreachable".toPath).addTaskUnreachable(since = since).getInstance()
-          case Condition.UnreachableInactive => TestInstanceBuilder.newBuilder("/inactive".toPath).addTaskUnreachableInactive(since = since).getInstance()
           case _ => TestInstanceBuilder.newBuilder("/running".toPath).addTaskRunning(startedAt = startedAt).getInstance()
         }
-        val instances = InstancesBySpec.forInstances(task).instancesMap
+        val instances = InstancesBySpec.forInstances(instance).instancesMap
 
-        val filterForInactive = businessLogic.filterOverdueUnreachable(instances, f.clock.now()).map(identity)
-        val filterForExpunge = businessLogic.filterOverdueUnreachableInactive(instances, f.clock.now()).map(identity)
+        val filterForExpunge = businessLogic.filterOverdueUnreachable(instances, f.clock.now()).map(identity)
 
-        s"${if (!inactive) "not" else ""} mark it as inactive " in { filterForInactive.nonEmpty should be(inactive) }
         s"${if (!expunge) "not" else ""} select it for expunge" in { filterForExpunge.nonEmpty should be(expunge) }
       }
     }
@@ -88,53 +85,20 @@ class ExpungeOverdueLostTasksActorTest extends AkkaUnitTest with TableDrivenProp
       val running2 = TestInstanceBuilder.newBuilder("/running2".toPath).addTaskRunning(startedAt = Timestamp.zero).getInstance()
       val instances = InstancesBySpec.forInstances(running1, running2).instancesMap
 
-      val filtered = businessLogic.filterOverdueUnreachableInactive(instances, f.clock.now()).map(identity)
+      val filtered = businessLogic.filterOverdueUnreachable(instances, f.clock.now()).map(identity)
 
       "return an empty collection" in { filtered.isEmpty should be(true) }
     }
 
-    "filtering an UnreachableInactive and a running task" should {
-      val running = TestInstanceBuilder.newBuilder("/running".toPath).addTaskRunning(startedAt = Timestamp.zero).getInstance()
-      val inactive = TestInstanceBuilder.newBuilder("/inactive".toPath).addTaskUnreachableInactive(since = Timestamp.zero).getInstance()
-
-      val instances = InstancesBySpec.forInstances(running, inactive).instancesMap
-
-      val filtered = businessLogic.filterOverdueUnreachableInactive(instances, f.clock.now()).map(identity)
-
-      "return the UnreachableInactive task" in { filtered should be(Iterable(inactive)) }
-    }
-
-    "filtering an expired UnreachableInactive and an Unreachable task" should {
-      val unreachable = TestInstanceBuilder.newBuilder("/unreachable".toPath).addTaskUnreachable(since = Timestamp.zero).getInstance()
-      val inactive = TestInstanceBuilder.newBuilder("/inactive".toPath).addTaskUnreachableInactive(since = Timestamp.zero).getInstance()
-
-      val instances = InstancesBySpec.forInstances(unreachable, inactive).instancesMap
-
-      val filtered = businessLogic.filterOverdueUnreachableInactive(instances, f.clock.now()).map(identity)
-
-      "return the UnreachableInactive task" in { filtered should be(Iterable(inactive)) }
-    }
-
-    "filtering an expired and one not expired UnreachableInactive task" should {
-      val inactive1 = TestInstanceBuilder.newBuilder("/inactive1".toPath).addTaskUnreachableInactive(since = Timestamp.zero).getInstance()
-      val inactive2 = TestInstanceBuilder.newBuilder("/inactive2".toPath).addTaskUnreachableInactive(since = f.clock.now).getInstance()
+    "filtering two expired Unreachable tasks" should {
+      val inactive1 = TestInstanceBuilder.newBuilder("/unreachable1".toPath).addTaskUnreachable(since = Timestamp.zero).getInstance()
+      val inactive2 = TestInstanceBuilder.newBuilder("/unreachable1".toPath).addTaskUnreachable(since = Timestamp.zero).getInstance()
 
       val instances = InstancesBySpec.forInstances(inactive1, inactive2).instancesMap
 
-      val filtered = businessLogic.filterOverdueUnreachableInactive(instances, f.clock.now()).map(identity)
+      val filtered = businessLogic.filterOverdueUnreachable(instances, f.clock.now()).map(identity)
 
-      "return the expired UnreachableInactive task" in { filtered should be(Iterable(inactive1)) }
-    }
-
-    "filtering two expired UnreachableInactive tasks" should {
-      val inactive1 = TestInstanceBuilder.newBuilder("/unreachable1".toPath).addTaskUnreachableInactive(since = Timestamp.zero).getInstance()
-      val inactive2 = TestInstanceBuilder.newBuilder("/unreachable1".toPath).addTaskUnreachableInactive(since = Timestamp.zero).getInstance()
-
-      val instances = InstancesBySpec.forInstances(inactive1, inactive2).instancesMap
-
-      val filtered = businessLogic.filterOverdueUnreachableInactive(instances, f.clock.now()).map(identity)
-
-      "return the expired UnreachableInactive task" in { filtered should be(Iterable(inactive1, inactive2)) }
+      "return the expired Unreachable tasks" in { filtered should be(Iterable(inactive1, inactive2)) }
     }
   }
 
@@ -150,9 +114,9 @@ class ExpungeOverdueLostTasksActorTest extends AkkaUnitTest with TableDrivenProp
       }
     }
 
-    "checking one UnreachableInactive and one running task" should withActor { (f: Fixture, checkActor: ActorRef) =>
+    "checking one Unreachable and one running task" should withActor { (f: Fixture, checkActor: ActorRef) =>
       val running = TestInstanceBuilder.newBuilder("/running".toPath).addTaskRunning(startedAt = Timestamp.zero).getInstance()
-      val unreachable = TestInstanceBuilder.newBuilder("/unreachable".toPath).addTaskUnreachableInactive(since = Timestamp.zero).getInstance()
+      val unreachable = TestInstanceBuilder.newBuilder("/unreachable".toPath).addTaskUnreachable(since = Timestamp.zero).getInstance()
 
       f.taskTracker.instancesBySpec()(any[ExecutionContext]) returns Future.successful(InstancesBySpec.forInstances(running, unreachable))
 
@@ -166,9 +130,9 @@ class ExpungeOverdueLostTasksActorTest extends AkkaUnitTest with TableDrivenProp
       }
     }
 
-    "checking two UnreachableInactive task and one is overdue" should withActor { (f: Fixture, checkActor: ActorRef) =>
-      val unreachable1 = TestInstanceBuilder.newBuilder("/unreachable1".toPath).addTaskUnreachableInactive(since = Timestamp.zero).getInstance()
-      val unreachable2 = TestInstanceBuilder.newBuilder("/unreachable2".toPath).addTaskUnreachableInactive(since = f.clock.now()).getInstance()
+    "checking two Unreachable taskd and one is overdue" should withActor { (f: Fixture, checkActor: ActorRef) =>
+      val unreachable1 = TestInstanceBuilder.newBuilder("/unreachable1".toPath).addTaskUnreachable(since = Timestamp.zero).getInstance()
+      val unreachable2 = TestInstanceBuilder.newBuilder("/unreachable2".toPath).addTaskUnreachable(since = f.clock.now()).getInstance()
 
       f.taskTracker.instancesBySpec()(any[ExecutionContext]) returns Future.successful(InstancesBySpec.forInstances(unreachable1, unreachable2))
 
@@ -197,7 +161,7 @@ class ExpungeOverdueLostTasksActorTest extends AkkaUnitTest with TableDrivenProp
 
       "ensure backwards compatibility and issue one expunge" in {
         val (taskId, task) = unreachable1.tasksMap.head
-        verify(f.stateOpProcessor, once).process(InstanceUpdateOperation.MesosUpdate(unreachable1, Condition.Unreachable, task.mesosStatus.get, f.clock.now()))
+        verify(f.stateOpProcessor, once).process(InstanceUpdateOperation.ForceExpunge(unreachable1.instanceId))
         noMoreInteractions(f.stateOpProcessor)
       }
     }

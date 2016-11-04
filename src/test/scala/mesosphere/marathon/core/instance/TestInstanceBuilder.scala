@@ -36,9 +36,6 @@ case class TestInstanceBuilder(
   def addTaskUnreachable(since: Timestamp = now, containerName: Option[String] = None): TestInstanceBuilder =
     addTaskWithBuilder().taskUnreachable(since, containerName).build()
 
-  def addTaskUnreachableInactive(since: Timestamp = now, containerName: Option[String] = None): TestInstanceBuilder =
-    addTaskWithBuilder().taskUnreachableInactive(since, containerName).build()
-
   def addTaskError(since: Timestamp = now, containerName: Option[String] = None): TestInstanceBuilder =
     addTaskWithBuilder().taskError(since, containerName).build()
 
